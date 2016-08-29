@@ -4,7 +4,6 @@ import AdaptableController from './AdaptableController';
 import MailAdapter         from '../Adapters/Email/MailAdapter';
 import rest                from '../rest';
 
-var DatabaseAdapter = require('../DatabaseAdapter');
 var RestWrite = require('../RestWrite');
 var RestQuery = require('../RestQuery');
 var hash = require('../password').hash;
@@ -36,6 +35,10 @@ export class UserController extends AdaptableController {
     if (this.shouldVerifyEmails) {
       user._email_verify_token = randomString(25);
       user.emailVerified = false;
+
+      if (this.config.emailVerifyTokenValidityDuration) {
+        user._email_verify_token_expires_at = Parse._encode(this.config.generateEmailVerifyTokenExpiresAt());
+      }
     }
   }
 
@@ -45,10 +48,20 @@ export class UserController extends AdaptableController {
       // TODO: Better error here.
       throw undefined;
     }
-    return this.config.database.update('_User', {
-      username: username,
-      _email_verify_token: token
-    }, {emailVerified: true}).then(document => {
+
+    let query = {username: username, _email_verify_token: token};
+    let updateFields = { emailVerified: true, _email_verify_token: {__op: 'Delete'}};
+
+    // if the email verify token needs to be validated then
+    // add additional query params and additional fields that need to be updated
+    if (this.config.emailVerifyTokenValidityDuration) {
+      query.emailVerified = false;
+      query._email_verify_token_expires_at = { $gt: Parse._encode(new Date()) };
+
+      updateFields._email_verify_token_expires_at = {__op: 'Delete'};
+    }
+
+    return this.config.database.update('_User', query, updateFields).then((document) => {
       if (!document) {
         throw undefined;
       }

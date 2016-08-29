@@ -23,6 +23,7 @@ export default class PromiseRouter {
   //     location: optional. a location header
   constructor(routes = [], appId) {
     this.routes = routes;
+    this.middlewares = [];
     this.appId = appId;
     this.mountRoutes();
   }
@@ -37,6 +38,10 @@ export default class PromiseRouter {
       this.routes.push(route);
     }
   };
+
+  use(middleware) {
+    this.middlewares.push(middleware);
+  }
 
   route(method, path, ...handlers) {
     switch(method) {
@@ -107,47 +112,17 @@ export default class PromiseRouter {
 
   // Mount the routes on this router onto an express app (or express router)
   mountOnto(expressApp) {
-    for (var route of this.routes) {
-      switch(route.method) {
-      case 'POST':
-        expressApp.post(route.path, makeExpressHandler(this.appId, route.handler));
-        break;
-      case 'GET':
-        expressApp.get(route.path, makeExpressHandler(this.appId, route.handler));
-        break;
-      case 'PUT':
-        expressApp.put(route.path, makeExpressHandler(this.appId, route.handler));
-        break;
-      case 'DELETE':
-        expressApp.delete(route.path, makeExpressHandler(this.appId, route.handler));
-        break;
-      default:
-        throw 'unexpected code branch';
-      }
-    }
+    this.routes.forEach((route) => {
+      let method = route.method.toLowerCase();
+      let handler = makeExpressHandler(this.appId, route.handler);
+      let args = [].concat(route.path, this.middlewares, handler);
+      expressApp[method].apply(expressApp, args);
+    });
+    return expressApp;
   };
 
-  expressApp() {
-    var expressApp = express();
-    for (var route of this.routes) {
-      switch(route.method) {
-      case 'POST':
-        expressApp.post(route.path, makeExpressHandler(this.appId, route.handler));
-        break;
-      case 'GET':
-        expressApp.get(route.path, makeExpressHandler(this.appId, route.handler));
-        break;
-      case 'PUT':
-        expressApp.put(route.path, makeExpressHandler(this.appId, route.handler));
-        break;
-      case 'DELETE':
-        expressApp.delete(route.path, makeExpressHandler(this.appId, route.handler));
-        break;
-      default:
-        throw 'unexpected code branch';
-      }
-    }
-    return expressApp;
+  expressRouter() {
+    return this.mountOnto(express.Router());
   }
 }
 
@@ -184,7 +159,8 @@ function makeExpressHandler(appId, promiseHandler) {
         res.status(status);
 
         if (result.text) {
-          return res.send(result.text);
+          res.send(result.text);
+          return next();
         }
 
         if (result.location) {
@@ -192,7 +168,8 @@ function makeExpressHandler(appId, promiseHandler) {
           // Override the default expressjs response
           // as it double encodes %encoded chars in URL
           if (!result.response) {
-            return res.send('Found. Redirecting to '+result.location);
+            res.send('Found. Redirecting to '+result.location);
+            return next();
           }
         }
         if (result.headers) {
@@ -201,6 +178,7 @@ function makeExpressHandler(appId, promiseHandler) {
           })
         }
         res.json(result.response);
+        next();
       }, (e) => {
         log.error(`Error generating response. ${inspect(e)}`, {error: e});
         next(e);

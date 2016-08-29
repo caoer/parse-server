@@ -86,15 +86,14 @@ function del(config, auth, className, objectId, clientSDK) {
       objectId: objectId
     }, options);
   }).then(() => {
-    triggers.maybeRunTrigger(triggers.Types.afterDelete, auth, inflatedObject, null, config);
-    return;
+    return triggers.maybeRunTrigger(triggers.Types.afterDelete, auth, inflatedObject, null, config);    
   });
 }
 
 // Returns a promise for a {response, status, location} object.
 function create(config, auth, className, restObject, clientSDK) {
   enforceRoleSecurity('create', className, auth);
-  var write = new RestWrite(config, auth, className, null, restObject, clientSDK);
+  var write = new RestWrite(config, auth, className, null, restObject, null, clientSDK);
   return write.execute();
 }
 

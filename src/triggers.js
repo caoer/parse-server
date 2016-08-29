@@ -1,6 +1,7 @@
 // triggers.js
 import Parse    from 'parse/node';
 import AppCache from './cache';
+import { logger } from './logger';
 
 export const Types = {
   beforeSave: 'beforeSave',
@@ -101,7 +102,7 @@ export function getRequestObject(triggerType, auth, parseObject, originalParseOb
     triggerName: triggerType,
     object: parseObject,
     master: false,
-    log: config.loggerController && config.loggerController.adapter
+    log: config.loggerController
   };
 
   if (originalParseObject) {
@@ -152,11 +153,45 @@ export function getResponseObject(request, resolve, reject) {
   }
 };
 
+function userIdForLog(auth) {
+  return (auth && auth.user) ? auth.user.id : undefined;
+}
+
+function logTriggerAfterHook(triggerType, className, input, auth) {
+  const cleanInput = logger.truncateLogMessage(JSON.stringify(input));
+  logger.info(`${triggerType} triggered for ${className} for user ${userIdForLog(auth)}:\n  Input: ${cleanInput}`, {
+    className,
+    triggerType,
+    user: userIdForLog(auth)
+  });
+}
+
+function logTriggerSuccessBeforeHook(triggerType, className, input, result, auth) {
+  const cleanInput = logger.truncateLogMessage(JSON.stringify(input));
+  const cleanResult = logger.truncateLogMessage(JSON.stringify(result));
+  logger.info(`${triggerType} triggered for ${className} for user ${userIdForLog(auth)}:\n  Input: ${cleanInput}\n  Result: ${cleanResult}`, {
+    className,
+    triggerType,
+    user: userIdForLog(auth)
+  });
+}
+
+function logTriggerErrorBeforeHook(triggerType, className, input, auth, error) {
+  const cleanInput = logger.truncateLogMessage(JSON.stringify(input));
+  logger.error(`${triggerType} failed for ${className} for user ${userIdForLog(auth)}:\n  Input: ${cleanInput}\n  Error: ${JSON.stringify(error)}`, {
+    className,
+    triggerType,
+    error,
+    user: userIdForLog(auth)
+  });
+}
+
+
 // To be used as part of the promise chain when saving/deleting an object
 // Will resolve successfully if no trigger is configured
 // Resolves to an object, empty or containing an object key. A beforeSave
 // trigger will set the object key to the rest format object to save.
-// originalParseObject is optional, we only need that for befote/afterSave functions
+// originalParseObject is optional, we only need that for before/afterSave functions
 export function maybeRunTrigger(triggerType, auth, parseObject, originalParseObject, config) {
   if (!parseObject) {
     return Promise.resolve({});
@@ -165,12 +200,36 @@ export function maybeRunTrigger(triggerType, auth, parseObject, originalParseObj
     var trigger = getTrigger(parseObject.className, triggerType, config.applicationId);
     if (!trigger) return resolve();
     var request = getRequestObject(triggerType, auth, parseObject, originalParseObject, config);
-    var response = getResponseObject(request, resolve, reject);
+    var response = getResponseObject(request, (object) => {
+      logTriggerSuccessBeforeHook(
+          triggerType, parseObject.className, parseObject.toJSON(), object, auth);
+      resolve(object);
+    }, (error) => {
+      logTriggerErrorBeforeHook(
+          triggerType, parseObject.className, parseObject.toJSON(), auth, error);
+      reject(error);
+    });
     // Force the current Parse app before the trigger
     Parse.applicationId = config.applicationId;
     Parse.javascriptKey = config.javascriptKey || '';
     Parse.masterKey = config.masterKey;
-    trigger(request, response);
+
+    // AfterSave and afterDelete triggers can return a promise, which if they
+    // do, needs to be resolved before this promise is resolved,
+    // so trigger execution is synced with RestWrite.execute() call.
+    // If triggers do not return a promise, they can run async code parallel
+    // to the RestWrite.execute() call.
+    var triggerPromise = trigger(request, response);
+    if(triggerType === Types.afterSave || triggerType === Types.afterDelete)
+    {
+        logTriggerAfterHook(triggerType, parseObject.className, parseObject.toJSON(), auth);
+        if(triggerPromise && typeof triggerPromise.then === "function") {
+            return triggerPromise.then(resolve, resolve);
+        }
+        else {
+            return resolve();
+        }
+    }
   });
 };
 

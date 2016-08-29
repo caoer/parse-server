@@ -20,11 +20,19 @@ export default function pushStatusHandler(config) {
   let pushStatus;
   let objectId = newObjectId();
   let database = config.database;
-
+  let lastPromise;
   let setInitial = function(body = {}, where, options = {source: 'rest'}) {
     let now = new Date();
     let data =  body.data || {};
     let payloadString = JSON.stringify(data);
+    let pushHash;
+    if (typeof data.alert === 'string') {
+      pushHash = md5Hash(data.alert);
+    } else if (typeof data.alert === 'object') {
+      pushHash = md5Hash(JSON.stringify(data.alert));
+    } else {
+      pushHash = 'd41d8cd98f00b204e9800998ecf8427e';
+    }
     let object = {
       objectId,
       createdAt: now,
@@ -36,24 +44,29 @@ export default function pushStatusHandler(config) {
       expiry: body.expiration_time,
       status: "pending",
       numSent: 0,
-      pushHash: md5Hash(payloadString),
+      pushHash,
       // lockdown!
       ACL: {}
     }
-
-    return database.create(PUSH_STATUS_COLLECTION, object).then(() => {
-      pushStatus = {
-        objectId
-      };
-      return Promise.resolve(pushStatus);
+    lastPromise = Promise.resolve().then(() => {
+      return database.create(PUSH_STATUS_COLLECTION, object).then(() => {
+        pushStatus = {
+          objectId
+        };
+        return Promise.resolve(pushStatus);
+      });
     });
+    return lastPromise;
   }
 
   let setRunning = function(installations) {
     logger.verbose('sending push to %d installations', installations.length);
-    return database.update(PUSH_STATUS_COLLECTION,
-      {status:"pending", objectId: objectId},
-      {status: "running", updatedAt: new Date() });
+    lastPromise = lastPromise.then(() => {
+      return database.update(PUSH_STATUS_COLLECTION,
+        {status:"pending", objectId: objectId},
+        {status: "running", updatedAt: new Date() });
+    });
+    return lastPromise;
   }
 
   let complete = function(results) {
@@ -87,7 +100,10 @@ export default function pushStatusHandler(config) {
       }, update);
     }
     logger.verbose('sent push! %d success, %d failures', update.numSent, update.numFailed);
-    return database.update(PUSH_STATUS_COLLECTION, {status:"running", objectId }, update);
+    lastPromise = lastPromise.then(() => {
+      return database.update(PUSH_STATUS_COLLECTION, {status:"running", objectId }, update);
+    });
+    return lastPromise;
   }
 
   let fail = function(err) {
@@ -97,7 +113,10 @@ export default function pushStatusHandler(config) {
       updatedAt: new Date()
     }
     logger.info('warning: error while sending push', err);
-    return database.update(PUSH_STATUS_COLLECTION, { objectId }, update);
+    lastPromise = lastPromise.then(() => {
+      return database.update(PUSH_STATUS_COLLECTION, { objectId }, update);
+    });
+    return lastPromise;
   }
 
   return Object.freeze({

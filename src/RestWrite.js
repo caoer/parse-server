@@ -165,9 +165,12 @@ RestWrite.prototype.runBeforeTrigger = function() {
     return triggers.maybeRunTrigger(triggers.Types.beforeSave, this.auth, updatedObject, originalObject, this.config);
   }).then((response) => {
     if (response && response.object) {
-      if (!_.isEqual(this.data, response.object)) {
-        this.storage.changedByTrigger = true;
-      }
+      this.storage.fieldsChangedByTrigger = _.reduce(response.object, (result, value, key) => {
+        if (!_.isEqual(this.data[key], value)) {
+          result.push(key);
+        }
+        return result;
+      }, []);
       this.data = response.object;
       // We should delete the objectId for an update write
       if (this.query && this.query.objectId) {
@@ -293,10 +296,10 @@ RestWrite.prototype.handleAuthData = function(authData) {
         // Login with auth data
         delete results[0].password;
         let userResult = results[0];
-        
+
         // need to set the objectId first otherwise location has trailing undefined
         this.data.objectId = userResult.objectId;
-        
+
         // Determine if authData was updated
         let mutatedAuthData = {};
         Object.keys(authData).forEach((provider) => {
@@ -306,7 +309,7 @@ RestWrite.prototype.handleAuthData = function(authData) {
             mutatedAuthData[provider] = providerData;
           }
         });
-        
+
         this.response = {
           response: userResult,
           location: this.location()
@@ -325,7 +328,7 @@ RestWrite.prototype.handleAuthData = function(authData) {
           return this.config.database.update(this.className, {objectId: this.data.objectId}, {authData: mutatedAuthData}, {});
         }
         return;
-        
+
       } else if (this.query && this.query.objectId) {
         // Trying to update auth data but users
         // are different
@@ -473,7 +476,7 @@ RestWrite.prototype.handleFollowup = function() {
     return this.config.database.destroy('_Session', sessionQuery)
     .then(this.handleFollowup.bind(this));
   }
-  
+
   if (this.storage && this.storage['generateNewSession']) {
     delete this.storage['generateNewSession'];
     return this.createSessionToken()
@@ -582,65 +585,83 @@ RestWrite.prototype.handleInstallation = function() {
   var promise = Promise.resolve();
 
   var idMatch; // Will be a match on either objectId or installationId
+  var objectIdMatch;
+  var installationIdMatch;
   var deviceTokenMatches = [];
 
+  // Instead of issuing 3 reads, let's do it with one OR.
+  let orQueries = [];
   if (this.query && this.query.objectId) {
-    promise = promise.then(() => {
-      return this.config.database.find('_Installation', {
+    orQueries.push({
         objectId: this.query.objectId
-      }, {}).then((results) => {
-        if (!results.length) {
-          throw new Parse.Error(Parse.Error.OBJECT_NOT_FOUND,
+    });
+  }
+  if (this.data.installationId) {
+    orQueries.push({
+      'installationId': this.data.installationId
+    });
+  }
+  if (this.data.deviceToken) {
+    orQueries.push({'deviceToken': this.data.deviceToken});
+  }
+
+  if (orQueries.length == 0) {
+    return;
+  }
+
+  promise = promise.then(() => {
+    return this.config.database.find('_Installation', {
+        '$or': orQueries
+    }, {});
+  }).then((results) => {
+    results.forEach((result) => {
+      if (this.query && this.query.objectId && result.objectId == this.query.objectId) {
+        objectIdMatch = result;
+      }
+      if (result.installationId == this.data.installationId) {
+        installationIdMatch = result;
+      }
+      if (result.deviceToken == this.data.deviceToken) {
+        deviceTokenMatches.push(result);
+      }
+    });
+
+    // Sanity checks when running a query
+    if (this.query && this.query.objectId) {
+      if (!objectIdMatch) {
+        throw new Parse.Error(Parse.Error.OBJECT_NOT_FOUND,
                                 'Object not found for update.');
-        }
-        idMatch = results[0];
-        if (this.data.installationId && idMatch.installationId &&
-          this.data.installationId !== idMatch.installationId) {
+      }
+      if (this.data.installationId && objectIdMatch.installationId &&
+          this.data.installationId !== objectIdMatch.installationId) {
           throw new Parse.Error(136,
                                 'installationId may not be changed in this ' +
                                 'operation');
         }
-        if (this.data.deviceToken && idMatch.deviceToken &&
-          this.data.deviceToken !== idMatch.deviceToken &&
-          !this.data.installationId && !idMatch.installationId) {
+        if (this.data.deviceToken && objectIdMatch.deviceToken &&
+          this.data.deviceToken !== objectIdMatch.deviceToken &&
+          !this.data.installationId && !objectIdMatch.installationId) {
           throw new Parse.Error(136,
                                 'deviceToken may not be changed in this ' +
                                 'operation');
         }
         if (this.data.deviceType && this.data.deviceType &&
-          this.data.deviceType !== idMatch.deviceType) {
+          this.data.deviceType !== objectIdMatch.deviceType) {
           throw new Parse.Error(136,
                                 'deviceType may not be changed in this ' +
                                 'operation');
         }
-        return;
-      });
-    });
-  }
+    }
 
-  // Check if we already have installations for the installationId/deviceToken
-  promise = promise.then(() => {
-    if (this.data.installationId) {
-      return this.config.database.find('_Installation', {
-        'installationId': this.data.installationId
-      });
+    if (this.query && this.query.objectId && objectIdMatch) {
+      idMatch = objectIdMatch;
     }
-    return Promise.resolve([]);
-  }).then((results) => {
-    if (results && results.length) {
-      // We only take the first match by installationId
-      idMatch = results[0];
+
+    if (this.data.installationId && installationIdMatch) {
+      idMatch = installationIdMatch;
     }
-    if (this.data.deviceToken) {
-      return this.config.database.find(
-        '_Installation',
-        {'deviceToken': this.data.deviceToken});
-    }
-    return Promise.resolve([]);
-  }).then((results) => {
-    if (results) {
-      deviceTokenMatches = results;
-    }
+
+  }).then(() => {
     if (!idMatch) {
       if (!deviceTokenMatches.length) {
         return;
@@ -774,9 +795,7 @@ RestWrite.prototype.runDatabaseOperation = function() {
     return this.config.database.update(this.className, this.query, this.data, this.runOptions)
     .then(response => {
       response.updatedAt = this.updatedAt;
-      if (this.storage.changedByTrigger) {
-        this.updateResponseWithData(response, this.data);
-      }
+      this._updateResponseWithData(response, this.data);
       this.response = { response };
     });
   } else {
@@ -828,13 +847,11 @@ RestWrite.prototype.runDatabaseOperation = function() {
     .then(response => {
       response.objectId = this.data.objectId;
       response.createdAt = this.data.createdAt;
-      
+
       if (this.responseShouldHaveUsername) {
         response.username = this.data.username;
       }
-      if (this.storage.changedByTrigger) {
-        this.updateResponseWithData(response, this.data);
-      }
+      this._updateResponseWithData(response, this.data);
       this.response = {
         status: 201,
         response,
@@ -878,7 +895,7 @@ RestWrite.prototype.runAfterTrigger = function() {
   this.config.liveQueryController.onAfterSave(updatedObject.className, updatedObject, originalObject);
 
   // Run afterSave trigger
-  triggers.maybeRunTrigger(triggers.Types.afterSave, this.auth, updatedObject, originalObject, this.config);
+  return triggers.maybeRunTrigger(triggers.Types.afterSave, this.auth, updatedObject, originalObject, this.config);
 };
 
 // A helper to figure out what location this operation happens at.
@@ -922,14 +939,17 @@ RestWrite.prototype.cleanUserAuthData = function() {
   }
 };
 
-RestWrite.prototype.updateResponseWithData = function(response, data) {
+RestWrite.prototype._updateResponseWithData = function(response, data) {
+  if (_.isEmpty(this.storage.fieldsChangedByTrigger)) {
+    return response;
+  }
   let clientSupportsDelete = ClientSDK.supportsForwardDelete(this.clientSDK);
-  Object.keys(data).forEach(fieldName => {
+  this.storage.fieldsChangedByTrigger.forEach(fieldName => {
     let dataValue = data[fieldName];
     let responseValue = response[fieldName];
 
     response[fieldName] = responseValue || dataValue;
-    
+
     // Strips operations from responses
     if (response[fieldName] && response[fieldName].__op) {
       delete response[fieldName];

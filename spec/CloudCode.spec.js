@@ -59,6 +59,21 @@ describe('Cloud Code', () => {
     })
   });
 
+  it('returns an error', (done) => {
+    Parse.Cloud.define('cloudCodeWithError', (req, res) => {
+      foo.bar();
+      res.success('I better throw an error.');
+    });
+
+    Parse.Cloud.run('cloudCodeWithError')
+      .then(
+        a => done.fail('should not succeed'),
+        e => {
+          expect(e).toEqual(new Parse.Error(1, undefined));
+          done();
+        });
+  });
+
   it('beforeSave rejection with custom error code', function(done) {
     Parse.Cloud.beforeSave('BeforeSaveFailWithErrorCode', function (req, res) {
       res.error(999, 'Nope');
@@ -160,6 +175,162 @@ describe('Cloud Code', () => {
         done();
       });
     }, 500);
+  });
+
+  it('test afterSave ran on created object and returned a promise', function(done) {
+    Parse.Cloud.afterSave('AfterSaveTest2', function(req) {
+        let obj = req.object;
+        if(!obj.existed())
+        {
+            let promise = new Parse.Promise();
+            setTimeout(function(){
+                obj.set('proof', obj.id);
+                obj.save().then(function(){
+                    promise.resolve();
+                });
+            }, 1000);
+
+            return promise;
+        }
+    });
+
+    let obj = new Parse.Object('AfterSaveTest2');
+    obj.save().then(function(){
+        let query = new Parse.Query('AfterSaveTest2');
+        query.equalTo('proof', obj.id);
+        query.find().then(function(results) {
+            expect(results.length).toEqual(1);
+            let savedObject = results[0];
+            expect(savedObject.get('proof')).toEqual(obj.id);
+            done();
+        },
+        function(error) {
+            fail(error);
+            done();
+        });
+    });
+  });
+
+  it('test afterSave ignoring promise, object not found', function(done) {
+    Parse.Cloud.afterSave('AfterSaveTest2', function(req) {
+        let obj = req.object;
+        if(!obj.existed())
+        {
+            let promise = new Parse.Promise();
+            setTimeout(function(){
+                obj.set('proof', obj.id);
+                obj.save().then(function(){
+                    promise.resolve();
+                });
+            }, 1000);
+
+            return promise;
+        }
+    });
+
+    let obj = new Parse.Object('AfterSaveTest2');
+    obj.save().then(function(){
+        done();
+    })
+
+    let query = new Parse.Query('AfterSaveTest2');
+    query.equalTo('proof', obj.id);
+    query.find().then(function(results) {
+        expect(results.length).toEqual(0);
+    },
+    function(error) {
+        fail(error);
+    });
+  });
+
+  it('test afterSave rejecting promise', function(done) {
+      Parse.Cloud.afterSave('AfterSaveTest2', function(req) {
+          let promise = new Parse.Promise();
+          setTimeout(function(){
+              promise.reject("THIS SHOULD BE IGNORED");
+          }, 1000);
+
+          return promise;
+      });
+
+      let obj = new Parse.Object('AfterSaveTest2');
+      obj.save().then(function(){
+          done();
+      }, function(error){
+          fail(error);
+          done();
+      })
+  });
+
+  it('test afterDelete returning promise, object is deleted when destroy resolves', function(done) {
+      Parse.Cloud.afterDelete('AfterDeleteTest2', function(req) {
+        let promise = new Parse.Promise();
+
+        setTimeout(function(){
+            let obj = new Parse.Object('AfterDeleteTestProof');
+            obj.set('proof', req.object.id);
+            obj.save().then(function(){
+                promise.resolve();
+            });
+
+        }, 1000);
+
+        return promise;
+      });
+
+      let errorHandler = function(error) {
+          fail(error);
+          done();
+      }
+
+      let obj = new Parse.Object('AfterDeleteTest2');
+      obj.save().then(function(){
+          obj.destroy().then(function(){
+              let query = new Parse.Query('AfterDeleteTestProof');
+              query.equalTo('proof', obj.id);
+              query.find().then(function(results) {
+                  expect(results.length).toEqual(1);
+                  let deletedObject = results[0];
+                  expect(deletedObject.get('proof')).toEqual(obj.id);
+                  done();
+              }, errorHandler);
+          }, errorHandler)
+      }, errorHandler);
+  });
+
+  it('test afterDelete ignoring promise, object is not yet deleted', function(done) {
+      Parse.Cloud.afterDelete('AfterDeleteTest2', function(req) {
+        let promise = new Parse.Promise();
+
+        setTimeout(function(){
+            let obj = new Parse.Object('AfterDeleteTestProof');
+            obj.set('proof', req.object.id);
+            obj.save().then(function(){
+                promise.resolve();
+            });
+
+        }, 1000);
+
+        return promise;
+      });
+
+      let errorHandler = function(error) {
+          fail(error);
+          done();
+      }
+
+      let obj = new Parse.Object('AfterDeleteTest2');
+      obj.save().then(function(){
+          obj.destroy().then(function(){
+              done();
+          })
+
+          let query = new Parse.Query('AfterDeleteTestProof');
+          query.equalTo('proof', obj.id);
+          query.find().then(function(results) {
+              expect(results.length).toEqual(0);
+          }, errorHandler);
+      }, errorHandler);
   });
 
   it('test beforeSave happens on update', function(done) {
@@ -323,6 +494,16 @@ describe('Cloud Code', () => {
       expect(req.params.complexStructure.deepDate.date[0].getTime()).toBe(1463907600000);
       expect(req.params.complexStructure.deepDate2[0].date instanceof Date).toBe(true);
       expect(req.params.complexStructure.deepDate2[0].date.getTime()).toBe(1463907600000);
+      // Regression for #2294
+      expect(req.params.file instanceof Parse.File).toBe(true);
+      expect(req.params.file.url()).toEqual('https://some.url');
+      // Regression for #2204
+      expect(req.params.array).toEqual(['a', 'b', 'c']);
+      expect(Array.isArray(req.params.array)).toBe(true);
+      expect(req.params.arrayOfArray).toEqual([['a', 'b', 'c'], ['d', 'e','f']]);
+      expect(Array.isArray(req.params.arrayOfArray)).toBe(true);
+      expect(Array.isArray(req.params.arrayOfArray[0])).toBe(true);
+      expect(Array.isArray(req.params.arrayOfArray[1])).toBe(true);
       return res.success({});
     });
 
@@ -361,7 +542,14 @@ describe('Cloud Code', () => {
             }
           }
         ]
-      }
+      },
+      'file': Parse.File.fromJSON({
+        __type: 'File',
+        name: 'name',
+        url: 'https://some.url'
+      }),
+      'array': ['a', 'b', 'c'],
+      'arrayOfArray': [['a', 'b', 'c'], ['d', 'e', 'f']]
     };
     Parse.Cloud.run('params', params).then((result) => {
       done();
@@ -667,7 +855,45 @@ describe('Cloud Code', () => {
     });
   });
 
-  it_exclude_dbs(['postgres'])('should fully delete objects when using `unset` with beforeSave (regression test for #1840)', done => {
+it('beforeSave should not affect fetched pointers', done => {
+    Parse.Cloud.beforeSave('BeforeSaveUnchanged', (req, res) => {
+      res.success();
+    });
+
+    Parse.Cloud.beforeSave('BeforeSaveChanged', function(req, res) {
+      req.object.set('foo', 'baz');
+      res.success();
+    });
+
+    var TestObject =  Parse.Object.extend("TestObject");
+    var BeforeSaveUnchangedObject = Parse.Object.extend("BeforeSaveUnchanged");
+    var BeforeSaveChangedObject = Parse.Object.extend("BeforeSaveChanged");
+
+    var aTestObject = new TestObject();
+    aTestObject.set("foo", "bar");
+    aTestObject.save()
+    .then(aTestObject => {
+      var aBeforeSaveUnchangedObject = new BeforeSaveUnchangedObject();
+      aBeforeSaveUnchangedObject.set("aTestObject", aTestObject);
+      expect(aBeforeSaveUnchangedObject.get("aTestObject").get("foo")).toEqual("bar");
+      return aBeforeSaveUnchangedObject.save();
+    })
+    .then(aBeforeSaveUnchangedObject => {
+      expect(aBeforeSaveUnchangedObject.get("aTestObject").get("foo")).toEqual("bar");
+
+      var aBeforeSaveChangedObject = new BeforeSaveChangedObject();
+      aBeforeSaveChangedObject.set("aTestObject", aTestObject);
+      expect(aBeforeSaveChangedObject.get("aTestObject").get("foo")).toEqual("bar");
+      return aBeforeSaveChangedObject.save();
+    })
+    .then(aBeforeSaveChangedObject => {
+      expect(aBeforeSaveChangedObject.get("aTestObject").get("foo")).toEqual("bar");
+      expect(aBeforeSaveChangedObject.get("foo")).toEqual("baz");
+      done();
+    });
+  });
+
+  it('should fully delete objects when using `unset` with beforeSave (regression test for #1840)', done => {
     var TestObject = Parse.Object.extend('TestObject');
     var NoBeforeSaveObject = Parse.Object.extend('NoBeforeSave');
     var BeforeSaveObject = Parse.Object.extend('BeforeSaveChanged');
@@ -691,7 +917,7 @@ describe('Cloud Code', () => {
       })
       .then(object => {
         res.success(object);
-      });
+      }).catch(res.error);
     });
 
     Parse.Cloud.define('removeme2', (req, res) => {
@@ -707,7 +933,7 @@ describe('Cloud Code', () => {
       })
       .then(object => {
         res.success(object);
-      });
+      }).catch(res.error);
     });
 
     Parse.Cloud.run('removeme')
@@ -720,10 +946,13 @@ describe('Cloud Code', () => {
       expect(aBeforeSaveObj.get('before')).toEqual('save');
       expect(aBeforeSaveObj.get('remove')).toEqual(undefined);
       done();
+    }).catch((err) => {
+      jfail(err);
+      done();
     });
   });
 
-  it_exclude_dbs(['postgres'])('should fully delete objects when using `unset` with beforeSave (regression test for #1840)', done => {
+  it('should fully delete objects when using `unset` with beforeSave (regression test for #1840)', done => {
     var TestObject = Parse.Object.extend('TestObject');
     var BeforeSaveObject = Parse.Object.extend('BeforeSaveChanged');
 
@@ -747,12 +976,12 @@ describe('Cloud Code', () => {
        expect(object.get('remove')).toBeUndefined();
        done();
     }).fail((err) => {
-      console.error(err);
+      jfail(err);
       done();
-    })
+    });
   });
 
-  it_exclude_dbs(['postgres'])('should not include relation op (regression test for #1606)', done => {
+  it('should not include relation op (regression test for #1606)', done => {
     var TestObject = Parse.Object.extend('TestObject');
     var BeforeSaveObject = Parse.Object.extend('BeforeSaveChanged');
     let testObj;
@@ -763,7 +992,7 @@ describe('Cloud Code', () => {
       testObj.save().then(() => {
         object.relation('testsRelation').add(testObj);
         res.success();
-      })
+      }, res.error);
     });
 
     let object = new BeforeSaveObject();
@@ -772,7 +1001,7 @@ describe('Cloud Code', () => {
       expect(() => { objectAgain.relation('testsRelation') }).not.toThrow();
       done();
     }).fail((err) => {
-      console.error(err);
+      jfail(err);
       done();
     })
   });
